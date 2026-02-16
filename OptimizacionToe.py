@@ -63,11 +63,12 @@ class ToeOptimizer:
 
     def solve_hub(self, u, l, tro):
         def eq(h):
-            return [np.linalg.norm(h - u) - np.linalg.norm(u - tro),
-                    np.linalg.norm(h - l) - np.linalg.norm(l - tro)]
+            return [
+                np.linalg.norm(h - u) - self.active_u_hub,
+                np.linalg.norm(h - l) - self.active_l_hub
+            ]
         res = least_squares(eq, tro, ftol=1e-12)
         return res.x, res.success
-
     def get_orientation(self, u, l, h):
         # Create a local coordinate system based on the wishbone and hub positions
         x_axis = (u - l) / np.linalg.norm(u - l)
@@ -85,9 +86,7 @@ class ToeOptimizer:
         self.active_tr_len = np.linalg.norm(outer_guess - self.active_inner)
         self.active_u_tro = np.linalg.norm(self.upper_wishbone['upright'] - outer_guess)
         self.active_l_tro = np.linalg.norm(self.lower_wishbone['upright'] - outer_guess)
-        self.active_u_hub = np.linalg.norm(self.upper_wishbone['upright'] - outer_guess)
-        self.active_l_hub = np.linalg.norm(self.lower_wishbone['upright'] - outer_guess)
-
+        
         u_s, l_s, ok_s = self.solve_by_angles(0.0)
         if not ok_s:
             return 1e9
@@ -140,6 +139,7 @@ class ToeOptimizer:
 
         # Combine with weights
         total_error = (rms_error * 100) + (peak_error * 50) + (curvature * 10)
+        
         return total_error
 
 
@@ -156,11 +156,13 @@ class ToeOptimizer:
         res = differential_evolution(
             self.objective, bnds, 
             strategy='best1bin',
-            popsize=20, 
+            popsize=20,
+            maxiter=100,
             tol=1e-6, 
             mutation=(0.5, 1.0),
             recombination=0.7,
-            polish=True
+            polish=True,
+            disp=True
         )
         
         if res.success:
