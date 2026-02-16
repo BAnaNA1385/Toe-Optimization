@@ -6,6 +6,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from scipy.optimize import minimize, fsolve, least_squares
 from scipy.interpolate import make_interp_spline, BSpline, interp1d
 import csv
+from scipy.optimize import differential_evolution
 
 
 class ToeOptimizer():
@@ -23,40 +24,76 @@ class ToeOptimizer():
         }
         self.tie_rod = {
 
-            'inner': np.array([0, 0, 0], dtype=float),
-            'outer': np.array([0, 0, 0], dtype=float)
+            'inner': np.array([-10.0, 195.0, 250.0], dtype=float),
+            'outer': np.array([-46.0, 596.0, 156.0], dtype=float)
         }
+        self.hub = np.array([0, 613.227, 203.192])
 
         self.minimum_heave = -30
         self.maximum_heave = 30
         self.step = 1
+        self.fixed_tr_length = np.linalg.norm(self.tie_rod['outer'] - self.tie_rod['inner'])
+        self.fixed_dist_u_tro = np.linalg.norm(self.upper_wishbone['upright'] - self.tie_rod['outer'])
+        self.fixed_dist_l_tro = np.linalg.norm(self.lower_wishbone['upright'] - self.tie_rod['outer'])
+        print("--- Baseline Bump Steer Curve ---")
 
-        heave_range = range(self.minimum_heave,
-                            self.maximum_heave + 1, self.step)
+        u_stat, l_stat, _, _ = self.solve_by_angles(0.0)
+        tro_stat, _ = self.solve_tie_rod(u_stat, l_stat)
+        hub_stat, _ = self.solve_hub(u_stat, l_stat)
+        
+        static_R = self.get_upright_rotation_matrix(u_stat, l_stat, tro_stat, hub_stat)
+        
+        curve_results = {}
+        prev_w_thetas = np.array([0.0, 0.0])
+        prev_tro = tro_stat
+        for heave in range(0, self.maximum_heave + 1, self.step):
+            upper, lower, thetas, w_succ = self.solve_by_angles(heave, prev_thetas=prev_w_thetas)
+            tro, t_succ = self.solve_tie_rod(upper, lower, prev_tro=prev_tro)
+            hub, _ = self.solve_hub(upper, lower, prev_hub=self.hub)
+            current_tr_length = np.linalg.norm(tro - self.tie_rod['inner'])
+            if w_succ and t_succ:
+                bump_steer = self.get_bump_steer(upper, lower, tro, hub, static_R)
+                curve_results[heave] = bump_steer
+                prev_w_thetas = thetas
+                prev_tro = tro
+            else:
+                curve_results[heave] = None 
 
-        for heave in heave_range:
+        prev_w_thetas = np.array([0.0, 0.0]) 
+        prev_tro = tro_stat 
+        for heave in range(-self.step, self.minimum_heave - 1, -self.step):
+            upper, lower, thetas, w_succ = self.solve_by_angles(heave, prev_thetas=prev_w_thetas)
+            tro, t_succ = self.solve_tie_rod(upper, lower, prev_tro=prev_tro)
+            current_tr_length = np.linalg.norm(tro - self.tie_rod['inner'])
+            if w_succ and t_succ:
+                bump_steer = self.get_bump_steer(upper, lower, tro, hub, static_R)
+                curve_results[heave] = bump_steer
+                prev_w_thetas = thetas
+                prev_tro = tro
+            else:
+                curve_results[heave] = None
 
-            upper, lower, _, w_success = self.solve_by_angles(heave)
-            tie_rod_out, t_success = self.solve_tie_rod(upper, lower)
-            if not w_success or not t_success:
-                return 1e6
+        for heave in range(self.minimum_heave, self.maximum_heave + 1, self.step):
+            val = curve_results.get(heave)
+            if val is not None:
+                print(f"Heave {heave:3}mm | Toe Change: {val:.4f} deg")
+            else:
+                print(f"Heave {heave:3}mm | KINEMATIC BIND (Solver Failed)")
 
-            bump_steer = self.get_bump_steer(
-                upper, lower, tie_rod_out, static_toe_angle=0.0)
-            print(bump_steer)
-
-        best_result = self.toe_optimizer()
-        for i in range(100):
-            init = best_result.x + np.random.normal(scale=100.0, size=6)
+        best_result = self.toe_optimizer(self.tie_rod['inner'].tolist() + self.tie_rod['outer'].tolist())
+        print(best_result)
+        for i in range(50):
+            init = best_result.x + np.random.normal(scale=5.0, size=6)
             res = self.toe_optimizer(init)
-
+            print(res)
             if res.fun < best_result.fun:
                 best_result = res
+                print(best_result)
 
         print(
             f"New Inner Tie Rod: {np.round(best_result.x[0])}, {np.round(best_result.x[1])}, {np.round(best_result.x[2])}")
         print(
-            f"New Outer Tie Rod: {np.round(bes_result.x[3])}, {np.round(best_result.x[4])}, {np.round(best_result.x[5])}")
+            f"New Outer Tie Rod: {np.round(best_result.x[3])}, {np.round(best_result.x[4])}, {np.round(best_result.x[5])}")
 
     def rodrigues_rotate(self, vec, axis, theta):
 
@@ -76,10 +113,9 @@ class ToeOptimizer():
 
     def solve_by_angles(self, motion_value, heave_mode='avg', prev_thetas=None):
 
-        upper_inner = (
-            self.upper_wishbone['chassis_fore'] - self.upper_wishbone['chassis_rear'])/2
-        lower_inner = (
-            self.lower_wishbone['chassis_fore'] - self.lower_wishbone['chassis_rear'])/2
+
+        upper_inner = (self.upper_wishbone['chassis_fore'] + self.upper_wishbone['chassis_rear'])/2
+        lower_inner = (self.lower_wishbone['chassis_fore'] + self.lower_wishbone['chassis_rear'])/2
         initial_upper_out = self.upper_wishbone['upright']
         initial_lower_out = self.lower_wishbone['upright']
         u_axis = self.upper_wishbone['chassis_fore'] - \
@@ -118,7 +154,6 @@ class ToeOptimizer():
 
         def fun(thetas):
             tu, tl = float(thetas[0]), float(thetas[1])
-            # rotate r_u0, r_l0 about respective axes
             r_u = self.rodrigues_rotate(r_u0, u_axis, tu)
             r_l = self.rodrigues_rotate(r_l0, l_axis, tl)
             upper = upper_inner + r_u
@@ -155,18 +190,18 @@ class ToeOptimizer():
         u_init = self.upper_wishbone['upright']
         l_init = self.lower_wishbone['upright']
 
-        tie_rod_length = np.linalg.norm(tri - tro_init)
-        dist_u_tro = np.linalg.norm(u_init - tro_init)
-        dist_l_tro = np.linalg.norm(l_init - tro_init)
+        tie_rod_length = self.fixed_tr_length
+        dist_u_tro = self.fixed_dist_u_tro
+        dist_l_tro = self.fixed_dist_l_tro
 
         def equations(vars):
             tro = np.array(vars, dtype=float)
 
-            eq1 = np.linalg.norm(tro - tri) - tie_rod_length
+            eq1 = np.linalg.norm(tro - tri)**2 - tie_rod_length**2
 
-            eq2 = np.linalg.norm(tro - new_upper_out) - dist_u_tro
+            eq2 = np.linalg.norm(tro - new_upper_out)**2 - dist_u_tro**2
 
-            eq3 = np.linalg.norm(tro - new_lower_out) - dist_l_tro
+            eq3 = np.linalg.norm(tro - new_lower_out)**2 - dist_l_tro**2
 
             return np.array([eq1, eq2, eq3], dtype=float)
 
@@ -180,97 +215,144 @@ class ToeOptimizer():
 
         return res.x, res.success
 
-    def get_bump_steer(self, upper_out, lower_out, tro_out, static_toe_angle=None):
-        kingpin_vec = upper_out - lower_out
-        tierod_vec = tro_out - lower_out
+    def solve_hub(self, new_upper_out, new_lower_out, prev_hub=None):
+        
+        hub_init = self.hub
+        u_init = self.upper_wishbone['upright']
+        l_init = self.lower_wishbone['upright']
 
-        normal_vec = np.cross(kingpin_vec, tierod_vec)
+        dist_u_hub = np.linalg.norm(u_init - hub_init)
+        dist_l_hub = np.linalg.norm(l_init - hub_init)
 
-        nx = normal_vec[0]
-        ny = normal_vec[1]
+        def equations(vars):
+            hub = np.array(vars, dtype=float)
 
-        current_yaw_rad = np.arctan2(nx, ny)
-        current_yaw_deg = 180-np.degrees(current_yaw_rad)
+            eq1 = np.linalg.norm(hub - new_upper_out)**2 - dist_u_hub**2
 
-        if static_toe_angle is not None:
-            delta_toe = current_yaw_deg - static_toe_angle
-            bump_steer = (delta_toe + 180) % 360 - 180
-            return bump_steer
+            eq2 = np.linalg.norm(hub - new_lower_out)**2 - dist_l_hub**2
 
-        return current_yaw_deg
+            return np.array([eq1, eq2], dtype=float)
+
+        x0 = prev_hub if prev_hub is not None else hub_init
+
+        res = least_squares(equations, x0, method='trf',
+                            ftol=1e-12, xtol=1e-12, gtol=1e-12)
+
+        if not res.success:
+            print("[Hub Solver] Failed to converge. Check geometry limits.")
+
+        return res.x, res.success
+    
+    def get_bump_steer(self, upper_out, lower_out, tro_out, hub_out, static_R=None):
+        current_R = self.get_upright_rotation_matrix(upper_out, lower_out, tro_out, hub_out)
+        
+        if static_R is None:
+            return 0.0 
+            
+        R_delta = current_R @ static_R.T
+        
+        static_heading = np.array([1.0, 0.0, 0.0])
+        current_heading = R_delta @ static_heading
+        toe_deg = np.degrees(np.arctan2(current_heading[1], current_heading[0]))
+        
+        return -toe_deg
 
     def toe_optimizer(self, initial_guess=None, target_bump_steer=0.0):
-
-        def objective(vars):
-            self.tie_rod['inner'] = np.array([vars[0], vars[1], vars[2]])
-            self.tie_rod['outer'] = np.array([vars[3], vars[4], vars[5]])
-
-            total_error = 0.0
-
-            u_stat, l_stat, _, stat_success = self.solve_by_angles(0.0)
-            if not stat_success:
-                return 1e6
-            tro_stat, tro_success = self.solve_tie_rod(u_stat, l_stat)
-            if not tro_success:
-                return 1e6
-
-            static_toe = self.get_bump_steer(u_stat, l_stat, tro_stat)
-
-            heave_range = range(self.minimum_heave,
-                                self.maximum_heave + 1, self.step)
-
-            for heave in heave_range:
-                if heave == 0:
-                    continue
-
-                upper, lower, _, w_success = self.solve_by_angles(heave)
-                tie_rod_out, t_success = self.solve_tie_rod(upper, lower)
-                if not w_success or not t_success:
-                    return 1e6
-
-                bump_steer = self.get_bump_steer(
-                    upper, lower, tie_rod_out, static_toe_angle=static_toe)
-                total_error += (bump_steer - target_bump_steer)**2
-
-            return total_error
-
+        # 1. Initialize x0 safely
         if initial_guess is not None and len(initial_guess) == 6:
             x0 = np.array(initial_guess, dtype=float)
-            print("Using custom initial guess...")
         else:
             x0 = np.concatenate((self.tie_rod['inner'], self.tie_rod['outer']))
-            print("Using current tie rod coordinates as initial guess...")
 
-        # Can move slightly fore/aft on the chassis
-        inner_x_bounds = (-150.0, 0)
-        inner_y_bounds = (195, 210)  # Rack width adjustment
-        # LOCKED! Steering rack height is fixed at Z=150
-        inner_z_bounds = (90, 300.0)
+        self.fixed_tr_length = np.linalg.norm(self.tie_rod['outer'] - self.tie_rod['inner'])
+        self.fixed_dist_u_tro = np.linalg.norm(self.upper_wishbone['upright'] - self.tie_rod['outer'])
+        self.fixed_dist_l_tro = np.linalg.norm(self.lower_wishbone['upright'] - self.tie_rod['outer'])
+        
 
-        # Outer Tie Rod (Upright Mount)
-        outer_x_bounds = (-110.0, 0)  # Steering arm length
-        outer_y_bounds = (500.0, 600.0)  # Wheel clearance limits
-        outer_z_bounds = (90.0, 200.0)  # Can be shimmed up and down by 40mm
+        # Bounds definition
+        bnds = [(-150, 0), (190, 220), (90, 300),  # Inner X, Y, Z
+                (-110, 0), (500, 600), (90, 200)] # Outer X, Y, Z
 
-        # Package them into a tuple of tuples
-        bnds = (inner_x_bounds, inner_y_bounds, inner_z_bounds,
-                outer_x_bounds, outer_y_bounds, outer_z_bounds)
-
-        print("Hunting for optimal Tie Rod coordinates within packaging limits...")
-
-        # --- NEW: Switch method to SLSQP and pass the bounds ---
-        res = minimize(objective, x0, method='SLSQP', bounds=bnds,
-                       options={'maxiter': 10000, 'ftol': 1e-6})
+        # Using a larger 'eps' (step size) helps SLSQP see past internal solver noise
+        res = differential_evolution(
+        self.objective,
+        bnds,
+        strategy='best1bin',
+        popsize=15,
+        tol=0.01,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        workers=1  # Uses all CPU cores
+    )
 
         if res.success:
-
             self.tie_rod['inner'] = res.x[0:3]
             self.tie_rod['outer'] = res.x[3:6]
-
-        else:
-            print("Optimization failed to converge. Try a different initial guess.")
-
         return res
+    
+    def objective(self, vars, target_bump_steer=0.0):
+            # Update the model coordinates for this iteration
+            self.tie_rod['inner'] = vars[0:3]
+            self.tie_rod['outer'] = vars[3:6]
+
+            total_error = 0.0
+            
+            # Solve static reference
+            u_stat, l_stat, _, stat_succ = self.solve_by_angles(0.0)
+            if not stat_succ: return 1e8
+            tro_stat, t_succ = self.solve_tie_rod(u_stat, l_stat)
+            hub_stat, h_succ = self.solve_hub(u_stat, l_stat)
+            if not (t_succ and h_succ): return 1e8
+
+            static_R = self.get_upright_rotation_matrix(u_stat, l_stat, tro_stat, hub_stat)
+            
+            # Combine bump and rebound into one clean list to check
+            heave_range = list(range(self.minimum_heave, self.maximum_heave + 1, 2)) # Step by 2 for speed
+            
+            prev_w_thetas = np.array([0.0, 0.0])
+            prev_tro_guess = tro_stat
+
+            for heave in heave_range:
+                if heave == 0: continue
+                
+                u, l, thetas, w_succ = self.solve_by_angles(heave, prev_thetas=prev_w_thetas)
+                tro, t_succ = self.solve_tie_rod(u, l, prev_tro=prev_tro_guess)
+                hub, h_succ = self.solve_hub(u, l, prev_hub=self.hub)
+
+                if w_succ and t_succ and h_succ:
+                    steer = self.get_bump_steer(u, l, tro, hub, static_R)
+                    
+                    # --- FIX FOR THE 180-DEGREE FLIP ---
+                    # If the solver jumps ~180 degrees, normalize it back to near zero
+                    if steer > 90: steer -= 180
+                    elif steer < -90: steer += 180
+                    
+                    total_error += (steer - target_bump_steer)**2
+                    
+                    # Seed next iteration for stability
+                    prev_w_thetas = thetas
+                    prev_tro_guess = tro
+                else:
+                    print(f"[Objective] Solver failed at heave {heave}mm. Penalizing heavily.")
+                    total_error += 1e8  # Penalty for kinematic binding
+
+            return total_error
+    def get_upright_rotation_matrix(self, upper, lower, tro, hub):
+
+        z_axis = upper - lower
+        z_axis /= np.linalg.norm(z_axis)
+        
+        spindle_vec = hub - lower
+        spindle_vec /= np.linalg.norm(spindle_vec)
+        
+        x_axis = spindle_vec - np.dot(spindle_vec, z_axis) * z_axis
+        x_axis /= np.linalg.norm(x_axis)
+        
+        y_axis = np.cross(z_axis, x_axis)
+        y_axis /= np.linalg.norm(y_axis)
+        
+        return np.column_stack((x_axis, y_axis, z_axis))
+
 
 
 if __name__ == "__main__":
