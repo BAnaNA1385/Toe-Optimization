@@ -4,7 +4,6 @@ from scipy.optimize import least_squares, differential_evolution
 
 class ToeOptimizer:
     def __init__(self):
-        # Hardware constants (The "Parts")
         self.upper_wishbone = {
             'upright': np.array([0.0, 537.77, 290.0]),
             'chassis_fore': np.array([150.0, 195.0, 256.83]),
@@ -17,7 +16,6 @@ class ToeOptimizer:
         }
         self.hub_init = np.array([0.0, 613.227, 203.192])
 
-        # State variables updated by the optimizer
         self.active_inner = np.array([-10.0, 195.0, 250.0])
         self.active_tr_len = 0.0
         self.active_u_tro = 0.0
@@ -69,8 +67,8 @@ class ToeOptimizer:
             ]
         res = least_squares(eq, tro, ftol=1e-12)
         return res.x, res.success
+    
     def get_orientation(self, u, l, h):
-        # Create a local coordinate system based on the wishbone and hub positions
         x_axis = (u - l) / np.linalg.norm(u - l)
         z_axis = np.cross(x_axis, h - u)
         z_axis /= np.linalg.norm(z_axis)
@@ -101,30 +99,26 @@ class ToeOptimizer:
 
         static_R = self.get_orientation(u_s, l_s, h_s)
 
-        heaves = np.arange(-30, 31, 2)  # -30mm to +30mm
+        heaves = np.arange(-30, 31, 2) 
         steer_results = []
 
         prev_theta_guess = None
         prev_tr_guess = tr_s
 
         for h in heaves:
-            # Solve wishbone positions at heave
             u, l, ok_w = self.solve_by_angles(h)
             if not ok_w:
                 return 1e9
 
-            # Solve tie rod using previous outer guess
             tr, ok_tr = self.solve_tie_rod(u, l, outer_guess=prev_tr_guess)
             if not ok_tr:
                 return 1e9
             prev_tr_guess = tr
 
-            # Solve hub based on updated tie rod
             hub, ok_h = self.solve_hub(u, l, tr)
             if not ok_h:
                 return 1e9
 
-            # Orientation matrix and toe
             curr_R = self.get_orientation(u, l, hub)
             heading = (curr_R @ static_R.T) @ np.array([1.0, 0.0, 0.0])
             toe_deg = np.degrees(np.arctan2(heading[1], heading[0]))
@@ -132,12 +126,11 @@ class ToeOptimizer:
 
         steer_results = np.array(steer_results)
 
-        # 3️⃣ Error scoring
+
         rms_error = np.sqrt(np.mean(steer_results**2))         # RMS magnitude
         peak_error = np.max(steer_results) - np.min(steer_results)  # Peak-to-peak
         curvature = np.sum(np.abs(np.diff(steer_results, n=2)))    # Second derivative
 
-        # Combine with weights
         total_error = (rms_error * 100) + (peak_error * 50) + (curvature * 10)
         
         return total_error
@@ -145,11 +138,10 @@ class ToeOptimizer:
 
 
     def optimize(self):
-        # NARROWER BOUNDS: Force the optimizer into a logical physical space
-        # Inner [X, Y, Z], Outer [X, Y, Z]
+
         bnds = [
-            (-100, 50),  (180, 220), (100, 300), # Rack
-            (-100, 50),  (550, 620), (100, 300)  # Upright
+            (-100, 50),  (195, 220), (100, 300),
+            (-100, 50),  (550, 620), (100, 300)  
         ]
         
         print("Starting Deep Kinematic Optimization...")
@@ -157,7 +149,7 @@ class ToeOptimizer:
             self.objective, bnds, 
             strategy='best1bin',
             popsize=20,
-            maxiter=100,
+            maxiter=200,
             tol=1e-6, 
             mutation=(0.5, 1.0),
             recombination=0.7,
@@ -173,4 +165,5 @@ class ToeOptimizer:
 
 if __name__ == "__main__":
     solver = ToeOptimizer()
-    solver.optimize()
+    res =solver.optimize()
+    print(res)
