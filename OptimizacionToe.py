@@ -148,8 +148,8 @@ class ToeOptimizer:
         res = differential_evolution(
             self.objective, bnds, 
             strategy='best1bin',
-            popsize=20,
-            maxiter=200,
+            popsize=50,
+            maxiter=100,
             tol=1e-6, 
             mutation=(0.5, 1.0),
             recombination=0.7,
