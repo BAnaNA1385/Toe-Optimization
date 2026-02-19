@@ -1,6 +1,7 @@
 import numpy as np
-from scipy.optimize import least_squares
 import matplotlib.pyplot as plt
+from scipy.optimize import least_squares, differential_evolution
+
 
 # ---------------------------------------
 # Rotation matrix from XYZ Euler angles
@@ -49,7 +50,7 @@ class RigidUprightModel:
         self.r_static = np.array([0, 650, 250])
         self.R_static = np.eye(3)
 
-        # Compute static global points
+        # Compute static global
         self.compute_static_lengths()
 
     def compute_static_lengths(self):
@@ -132,18 +133,56 @@ class RigidUprightModel:
 # Run simulation
 # ==========================================
 
-model = RigidUprightModel()
 
-heave_range = np.linspace(-30, 30, 50)
-toe_values = []
 
-for h in heave_range:
-    sol = model.solve_heave(h)
-    toe_values.append(model.compute_toe(sol))
+    def objective(self, vars):
 
-plt.plot(heave_range, toe_values)
-plt.xlabel("Heave (mm)")
-plt.ylabel("Toe Angle (deg)")
-plt.title("Toe vs Heave (Rigid Body Model)")
-plt.grid()
-plt.show()
+            # Update active tie rod positions
+            self.TR_in = vars[0:3]
+            self.p_TR = np.array(vars[3:6])
+            
+            
+            heave_range = np.linspace(-5, 5, 11)
+            toe_values = []
+            
+            for h in heave_range:
+                sol = model.solve_heave(h)
+                
+                toe_values.append(model.compute_toe(sol))
+
+
+
+            rms_error = np.sqrt(np.mean(np.array(toe_values)**2))         # RMS magnitude
+            peak_error = np.max(toe_values) - np.min(toe_values)  # Peak-to-peak
+            curvature = np.sum(np.abs(np.diff(toe_values, n=2)))    # Second derivative
+
+            total_error = (rms_error * 100) + (peak_error * 50) + (curvature * 10)
+            return total_error
+
+
+
+    def optimize(self):
+
+        bnds = [
+            (-100, 50),  (195, 220), (100, 300),
+            (-100, 50),  (550, 620), (100, 300)  
+        ]
+        
+        print("Starting Deep Kinematic Optimization...")
+        res = differential_evolution(
+            self.objective, bnds, 
+            strategy='rand1bin',
+            popsize=20,
+            maxiter=40,
+            tol=1e-6, 
+            mutation=(0.7, 1.5),
+            recombination=0.5,
+            polish=True,
+            disp=True
+        )
+
+ 
+if __name__ == "__main__":
+    model = RigidUprightModel()
+    res = model.optimize()
+    print(res)
